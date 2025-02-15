@@ -4,12 +4,12 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.common.action_chains import ActionChains
 
 @shared_task
 def scrape_unity_assets():
     from assets.models import UnityAsset
-
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument('--headless')
 
@@ -22,89 +22,137 @@ def scrape_unity_assets():
 
     def scroll_to_bottom(driver):
         last_height = driver.execute_script("return document.body.scrollHeight")
-        retries = 0
-        while retries < 5:
+        while True:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(5)
+            time.sleep(3)
             new_height = driver.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
-                retries += 1
-            else:
-                retries = 0
+                break
             last_height = new_height
 
     def collect_assets(driver):
-        wait = WebDriverWait(driver, 30)
-        asset_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "atomic-layout-section ul")))
-        asset_elements = asset_element.find_elements(By.CSS_SELECTOR, "article")
+        wait = WebDriverWait(driver, 3)
+        try:
+            asset_elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "article")))
+        except TimeoutException:
+            return []
 
         assets = []
         for asset in asset_elements:
             try:
                 title = asset.find_element(By.CSS_SELECTOR, 'span.relative').text
-                rating = asset.find_element(By.CSS_SELECTOR, 'div.tiny-text').text.replace("(", "").replace(")", "")
                 link = asset.find_element(By.CSS_SELECTOR, 'a.focus-outline').get_attribute('href')
                 publisher = asset.find_element(By.CSS_SELECTOR, 'a.caption-regular').text
 
-                ratings = rating.split('\n')
-                if len(ratings) == 2:
-                    rating_value, rating_count = ratings
-                else:
-                    rating_value = rating
-                    rating_count = None
+                rating_text = asset.find_element(By.CSS_SELECTOR, 'div.tiny-text').text.replace("(", "").replace(")", "")
+                ratings = rating_text.split('\n')
+                rating, rating_count = (ratings[0], ratings[1]) if len(ratings) == 2 else (rating_text, rating_text)
 
                 assets.append({
                     'title': title,
-                    'rating': rating_value,
+                    'rating': rating,
                     'rating_count': rating_count,
                     'publisher': publisher,
                     'link': link
                 })
-            except Exception as e:
-                print(f"Ошибка при обработке элемента: {e}")
+            except NoSuchElementException:
+                continue
         return assets
+
+    def get_asset_details(asset):
+        original_window = driver.current_window_handle
+
+        driver.execute_script(f"window.open('{asset['link']}', '_blank');")
+        time.sleep(3)
+
+        driver.switch_to.window(driver.window_handles[-1])
+        wait = WebDriverWait(driver, 3)
+
+        def safe_find(selector, default="Не найдено"):
+            try:
+                return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+            except TimeoutException:
+                return default
+
+        asset['price'] = safe_find('div.mErEH._223RA').text
+        asset['file_size'] = safe_find('div._27124.product-size').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+        asset['version'] = safe_find('div._27124.product-version').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+        asset['release_date'] = safe_find('div._27124.product-date').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+
+        try:
+            consent_button = driver.find_element(By.CSS_SELECTOR, '#onetrust-accept-btn-handler')
+            if consent_button.is_displayed():
+                driver.execute_script("arguments[0].click();", consent_button)
+        except NoSuchElementException:
+            pass
+
+        try:
+            overview_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href="#description"]')))
+            driver.execute_script("arguments[0].click();", overview_button)
+            time.sleep(3)
+
+            asset['description'] = safe_find('div._1_3uP._1rkJa').text.replace('\n', ' ')
+        except (TimeoutException, NoSuchElementException):
+            asset['description'] = None
+
+        driver.close()
+        driver.switch_to.window(original_window)
+
+        return asset
+
+    def safe_click(element):
+        try:
+            element.click()
+        except ElementClickInterceptedException:
+            driver.execute_script("arguments[0].click();", element)
 
     all_assets = []
     page_count = 0
 
     while True:
         page_count += 1
-        print(f"Обрабатываем страницу {page_count}...")
+        total_processed = 0
+        print(f"🔁 Обрабатываем страницу {page_count}...")
 
         scroll_to_bottom(driver)
         assets = collect_assets(driver)
+
+        for asset in assets:
+            asset = get_asset_details(asset)
+            print(asset)
+            all_assets.append(asset)
+            total_processed += 1
+            print(f"✅ Обработано {total_processed} из 96 объектов на странице")
+
         all_assets.extend(assets)
-        print(f"Найдено {len(assets)} объектов на странице {page_count}")
 
         try:
-            next_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label="Next"]'))
-            )
+            next_button = WebDriverWait(driver, 2).until(
+                 EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label="Next"]'))
+             )
+            """Задача в тестовом режиме на одну страницу, для полноценного поиска необходимо раскомментировать код ниже"""
+            # ActionChains(driver).move_to_element(next_button).perform()
 
-            ActionChains(driver).move_to_element(next_button).perform()
-
-            if next_button.get_attribute('disabled'):
-                print("Поиск окончен, завершаем задачу!")
+            if next_button.get_attribute('enabled'):# if next_button.get_attribute('disabled'):
+                print("✅ Поиск окончен, завершаем задачу!")
                 break
 
             try:
-                next_button.click()
+                # next_button.click()
+                print(f"Задача завершена!")
+                break
             except:
-                driver.execute_script("arguments[0].click();", next_button)
-            time.sleep(5)
+                # safe_click(next_button)
+                print(f"Задача завершена!")
+            time.sleep(2)
 
         except:
             print(f"Поиск окончен, задача завершена!")
             break
 
-    try:
-        driver.quit()
-    except Exception as e:
-        print(f"Ошибка при закрытии WebDriver: {e}")
 
-    print(f"Всего собрано {len(all_assets)} объектов.")
+    print(f"Всего собрано объектов: {len(all_assets)}\n")
 
-    # Сохранение в БД
     for asset in all_assets:
         obj, created = UnityAsset.objects.update_or_create(
             link=asset['link'],
@@ -112,11 +160,21 @@ def scrape_unity_assets():
                 'title': asset['title'],
                 'rating': asset['rating'],
                 'rating_count': asset['rating_count'],
-                'publisher': asset['publisher']
+                'publisher': asset['publisher'],
+                'price': asset['price'],
+                'file_size': asset['file_size'],
+                'version': asset['version'],
+                'release_date': asset['release_date']
             }
         )
 
+    try:
+        driver.quit()
+    except Exception as e:
+        print(f"Ошибка при закрытии WebDriver: {e}")
+
     return f"Объекты найдены и загружены в базу данных!"
+
 
 
 
@@ -129,15 +187,15 @@ def scrape_unity_assets():
 # from selenium.webdriver.common.by import By
 # from selenium.webdriver.support.ui import WebDriverWait
 # from selenium.webdriver.support import expected_conditions as EC
-# from assets.models import UnityAsset
-#
+# from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 #
 # @shared_task
 # def scrape_unity_assets():
+#     from assets.models import UnityAsset
 #     chrome_options = Options()
-#     chrome_options.add_argument('--headless')
-#
+#     # chrome_options.add_argument('--headless')  # Включить для работы в фоне
 #     driver = webdriver.Chrome(options=chrome_options)
+#
 #     url = 'https://assetstore.unity.com/search#nf-ec_price_filter=0...0'
 #     driver.get(url)
 #
@@ -145,75 +203,135 @@ def scrape_unity_assets():
 #         last_height = driver.execute_script("return document.body.scrollHeight")
 #         while True:
 #             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-#             time.sleep(2)
+#             time.sleep(3)
 #             new_height = driver.execute_script("return document.body.scrollHeight")
 #             if new_height == last_height:
 #                 break
 #             last_height = new_height
 #
 #     def collect_assets(driver):
-#         wait = WebDriverWait(driver, 60)
-#         asset_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "atomic-layout-section ul")))
-#         asset_elements = asset_element.find_elements(By.CSS_SELECTOR, "article")
+#         wait = WebDriverWait(driver, 2)
+#         try:
+#             asset_elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "article")))
+#         except TimeoutException:
+#             return []
 #
 #         assets = []
 #         for asset in asset_elements:
 #             try:
 #                 title = asset.find_element(By.CSS_SELECTOR, 'span.relative').text
-#                 rating = asset.find_element(By.CSS_SELECTOR, 'div.tiny-text').text.replace("(", "").replace(")", "")
 #                 link = asset.find_element(By.CSS_SELECTOR, 'a.focus-outline').get_attribute('href')
 #                 publisher = asset.find_element(By.CSS_SELECTOR, 'a.caption-regular').text
 #
-#                 ratings = rating.split('\n')
-#                 if len(ratings) == 2:
-#                     rating_value, rating_count = ratings
-#                 else:
-#                     rating_value = rating
-#                     rating_count = None
+#                 rating_text = asset.find_element(By.CSS_SELECTOR, 'div.tiny-text').text.replace("(", "").replace(")", "")
+#                 ratings = rating_text.split('\n')
+#                 rating, rating_count = (ratings[0], ratings[1]) if len(ratings) == 2 else (rating_text, rating_text)
 #
 #                 assets.append({
 #                     'title': title,
-#                     'rating': rating_value,
+#                     'rating': rating,
 #                     'rating_count': rating_count,
 #                     'publisher': publisher,
 #                     'link': link
 #                 })
-#             except Exception as e:
-#                 print(f"Ошибка при обработке элемента: {e}")
+#             except NoSuchElementException:
+#                 continue
 #         return assets
 #
-#     all_assets = []
+#     def get_asset_details(asset):
+#         original_window = driver.current_window_handle
+#         driver.execute_script(f"window.open('{asset['link']}', '_blank');")
+#         time.sleep(2)
+#         driver.switch_to.window(driver.window_handles[-1])
+#         wait = WebDriverWait(driver, 3)
 #
-#     while True:
-#         scroll_to_bottom(driver)
-#         assets = collect_assets(driver)
+#         def safe_find(selector, default="Не найдено"):
+#             try:
+#                 return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+#             except TimeoutException:
+#                 return default
+#
+#         asset['price'] = safe_find('div.mErEH._223RA').text
+#         asset['file_size'] = safe_find('div._27124.product-size').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+#         asset['version'] = safe_find('div._27124.product-version').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+#         asset['release_date'] = safe_find('div._27124.product-date').find_element(By.CSS_SELECTOR, 'div.SoNzt').text
+#         asset['views'] = safe_find('div.Iuau8').text.split(' ')[0]
+#
+#         try:
+#             consent_button = driver.find_element(By.CSS_SELECTOR, '#onetrust-accept-btn-handler')
+#             if consent_button.is_displayed():
+#                 consent_button.click()
+#                 time.sleep(3)
+#         except NoSuchElementException:
+#             pass
+#
+#         try:
+#             overview_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href="#description"]')))
+#             driver.execute_script("arguments[0].click();", overview_button)
+#             time.sleep(3)
+#             asset['description'] = safe_find('div._1_3uP._1rkJa').text.replace('\n', ' ')
+#         except (TimeoutException, NoSuchElementException):
+#             asset['description'] = "Описание не найдено"
+#
+#         driver.close()
+#         driver.switch_to.window(original_window)
+#         return asset
+#
+#     def safe_click(element):
+#         try:
+#             element.click()
+#         except ElementClickInterceptedException:
+#             driver.execute_script("arguments[0].click();", element)
+#
+#     all_assets = []
+#     page_count = 0
+#
+#    while True:
+#        page_count += 1
+#        total_processed = 0
+#        print(f"Обрабатываем страницу {page_count}...")
+#
+#        scroll_to_bottom(driver)
+#        assets = collect_assets(driver)
+#
+#        for asset in assets:
+#            asset = get_asset_details(asset)
+#            total_processed += 1
+#            print(f"✅ Обработано {total_processed} из 96 объектов на странице")
+#            all_assets.append(asset)
+#
 #         all_assets.extend(assets)
 #
 #         try:
 #             next_button = driver.find_element(By.CSS_SELECTOR, 'button[aria-label="Next"]')
 #             if next_button.get_attribute('disabled'):
 #                 break
-#             else:
-#                 next_button.click()
-#                 time.sleep(5)
-#         except Exception as e:
-#             print(f"Ошибка при переходе на следующую страницу: {e}")
+#             safe_click(next_button)
+#             time.sleep(3)
+#         except NoSuchElementException:
 #             break
 #
-#     driver.quit()
+#     print(f"Всего собрано объектов: {len(all_assets)}\n")
 #
-#     # Сохраняем данные в базу
 #     for asset in all_assets:
-#         UnityAsset.objects.update_or_create(
+#         obj, created = UnityAsset.objects.update_or_create(
 #             link=asset['link'],
 #             defaults={
 #                 'title': asset['title'],
 #                 'rating': asset['rating'],
 #                 'rating_count': asset['rating_count'],
-#                 'publisher': asset['publisher']
+#                 'publisher': asset['publisher'],
+#                 'price': asset['price'],
+#                 'file_size': asset['file_size'],
+#                 'version': asset['version'],
+#                 'release_date': asset['release_date']
 #             }
 #         )
 #
-#     return f"Собрано {len(all_assets)} объектов»
+#     try:
+#         driver.quit()
+#     except Exception as e:
+#         print(f"Ошибка при закрытии WebDriver: {e}")
 #
+#     return f"Объекты найдены и загружены в базу данных!"
 #

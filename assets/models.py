@@ -8,6 +8,10 @@ class UnityAsset(models.Model):
     rating_count = models.CharField(max_length=50, **NULLABLE, verbose_name='количество оценок')
     publisher = models.CharField(max_length=255, verbose_name='автор публикации')
     link = models.URLField(unique=True, verbose_name='ссылка')
+    file_size = models.CharField(max_length=255, **NULLABLE, verbose_name='размер файла')
+    price = models.CharField(max_length=255, **NULLABLE, verbose_name='цена')
+    release_date = models.CharField(max_length=255, **NULLABLE, verbose_name='дата релиза')
+    version = models.CharField(max_length=255, **NULLABLE, verbose_name='версия')
 
     def __str__(self):
         return self.title
