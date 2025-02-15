@@ -12,6 +12,7 @@ class UnityAsset(models.Model):
     price = models.CharField(max_length=255, **NULLABLE, verbose_name='цена')
     release_date = models.CharField(max_length=255, **NULLABLE, verbose_name='дата релиза')
     version = models.CharField(max_length=255, **NULLABLE, verbose_name='версия')
+    description = models.CharField(max_length=10000, **NULLABLE, verbose_name='описание')
 
     def __str__(self):
         return self.title

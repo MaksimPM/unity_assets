@@ -164,7 +164,8 @@ def scrape_unity_assets():
                 'price': asset['price'],
                 'file_size': asset['file_size'],
                 'version': asset['version'],
-                'release_date': asset['release_date']
+                'release_date': asset['release_date'],
+                'description': asset['description']
             }
         )
 
