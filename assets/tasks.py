@@ -125,7 +125,6 @@ def scrape_unity_assets():
             total_processed += 1
             print(f"✅ Обработано {total_processed} из 96 объектов на странице")
 
-        all_assets.extend(assets)
 
         try:
             next_button = WebDriverWait(driver, 2).until(
