@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('SECRET_KEY')
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -173,10 +173,10 @@ CELERY_TIMEZONE = "Europe/Moscow"
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_BEAT_SCHEDULE = {
-    'scrape-unity-assets-every-15-minutes': {
+    'scrape-unity-assets': {
         'task': 'assets.tasks.scrape_unity_assets',
-        'schedule': crontab(minute="42", hour="17")
+        'schedule': crontab(minute="2", hour="7")
         # Установите время для тестовой проверки работы парсера
-        # Рекомендуется каждые 5 часов crontab(minute=0, hour="*/5")
+        # Для работы через каждые 5 часов crontab(minute=0, hour="*/5")
     },
 }
